@@ -23,19 +23,9 @@ const KEYBOARD_ORBIT_SPEED: float = 1.8
 ## Radians of orbit per pixel of right-click mouse drag.
 const MOUSE_ORBIT_SENSITIVITY: float = 0.006
 
-## Room boundary used to decide which walls to show. Match geometry in _build_room_geometry.
+## Room boundary used to decide which walls to show. Match the wall positions in diner_room.tscn.
 const ROOM_WALL_X: float = 8.0
 const ROOM_WALL_Z: float = 6.0
-
-## Colors used throughout the room geometry.
-const COLOR_FLOOR       := Color(0.72, 0.66, 0.56)
-const COLOR_FLOOR_KITCH := Color(0.50, 0.47, 0.43)
-const COLOR_WALL        := Color(0.82, 0.79, 0.74)
-const COLOR_COUNTER     := Color(0.68, 0.67, 0.65)
-const COLOR_TRIM        := Color(0.55, 0.48, 0.40)
-const COLOR_DOOR_FRAME  := Color(0.40, 0.62, 0.40)
-const COLOR_COOKTOP     := Color(0.22, 0.22, 0.24)
-const COLOR_STATION_PAD := Color(0.32, 0.60, 0.34)
 
 ## Predefined table positions on the diner floor (world-space, y = 0).
 const TABLE_POSITIONS: Array[Vector3] = [
@@ -63,28 +53,28 @@ const COOK_COOKTOP_POS := Vector3(-2.5, 0.0, 5.0)
 const STATION_COOK_APPROACH := Vector3(3.0, 0.0, 2.7)
 
 ## Exact surface position on the counter where the food plate is set down.
-## y = counter body top (0.90) + trim height (0.06) = 0.96 - half-trim = 0.95
 const STATION_FOOD_POS := Vector3(3.0, 0.95, 2.0)
 
 ## Dining-room side position where the server stands to pick up food.
 const STATION_SERVER_APPROACH := Vector3(3.0, 0.0, 1.2)
 
+# ─── Scene node references (populated by @onready before _ready fires) ────────
+
+@onready var _camera: Camera3D              = $Camera
+@onready var _customers_container: Node3D   = $CustomersContainer
+@onready var _wall_north: Node3D            = $Room/WallNorth
+@onready var _wall_south: Node3D            = $Room/WallSouth
+@onready var _wall_east: Node3D             = $Room/WallEast
+@onready var _wall_west: Node3D             = $Room/WallWest
+
+# ─── Runtime state ────────────────────────────────────────────────────────────
+
 var _tables: Array[Table] = []
-var _customers_container: Node3D
 var _cook: Cook
 var _server: Server
-
-var _camera: Camera3D
-var _orbit_angle: float = ORBIT_START_ANGLE
-
-# Wall mesh references — toggled each frame based on camera position.
-var _wall_north: MeshInstance3D
-var _wall_south: MeshInstance3D
-var _wall_west: MeshInstance3D
-var _wall_east: MeshInstance3D
-
 var _hud: HUD
 
+var _orbit_angle: float = ORBIT_START_ANGLE
 var _day_timer: Timer
 var _spawn_timer: Timer
 var _time_remaining: float = 0.0
@@ -94,15 +84,15 @@ var _customer_scene: PackedScene
 
 
 func _ready() -> void:
-	_table_scene = load("res://scenes/table.tscn")
+	_table_scene   = load("res://scenes/table.tscn")
 	_customer_scene = load("res://scenes/customer.tscn")
 
-	_build_environment()
-	_build_lighting()
-	_build_room_geometry()
 	_build_tables()
 	_build_staff()
-	_build_camera()
+
+	# Position camera at the starting orbit angle.
+	_update_camera()
+	_update_wall_visibility()
 
 	_hud = load("res://scenes/hud.tscn").instantiate()
 	add_child(_hud)
@@ -110,13 +100,11 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
-	# Day timer HUD updates.
 	if _day_timer != null and not _day_timer.is_stopped():
 		_time_remaining = _day_timer.time_left
-		_hud.update_timer(int(_time_remaining))
+		_hud.update_time(_time_remaining)
 		_hud.update_earnings(int(GameData.day_earnings))
 
-	# Continuous keyboard orbit.
 	var orbit_input := Input.get_axis("camera_rotate_left", "camera_rotate_right")
 	if orbit_input != 0.0:
 		_orbit_angle += orbit_input * KEYBOARD_ORBIT_SPEED * delta
@@ -136,7 +124,7 @@ func start_day() -> void:
 	GameData.day_earnings = 0.0
 	_time_remaining = GameData.day_duration
 	_hud.set_day(GameData.day_number)
-	_hud.update_timer(int(GameData.day_duration))
+	_hud.update_time(GameData.day_duration)
 	_hud.update_earnings(0)
 	EventLog.log_event("=== Day %d begins! ===" % GameData.day_number)
 
@@ -154,85 +142,25 @@ func start_day() -> void:
 	_start_next_spawn()
 
 
-# ─── Scene construction ───────────────────────────────────────────────────────
+# ─── Camera ───────────────────────────────────────────────────────────────────
 
-func _build_environment() -> void:
-	var world_env := WorldEnvironment.new()
-	var env := Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.50, 0.58, 0.68)
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color.WHITE
-	env.ambient_light_energy = 0.45
-	world_env.environment = env
-	add_child(world_env)
+func _update_camera() -> void:
+	var x := cos(_orbit_angle) * ORBIT_RADIUS
+	var z := sin(_orbit_angle) * ORBIT_RADIUS
+	_camera.global_position = Vector3(x, ORBIT_HEIGHT, z)
+	_camera.look_at(FOCAL_POINT, Vector3.UP)
 
 
-func _build_lighting() -> void:
-	var light := DirectionalLight3D.new()
-	light.rotation_degrees = Vector3(-55.0, 35.0, 0.0)
-	light.light_energy = 1.1
-	light.light_color = Color(1.0, 0.97, 0.92)
-	light.shadow_enabled = false
-	add_child(light)
+func _update_wall_visibility() -> void:
+	var cx := _camera.global_position.x
+	var cz := _camera.global_position.z
+	_wall_west.visible  = cx > -ROOM_WALL_X
+	_wall_east.visible  = cx <  ROOM_WALL_X
+	_wall_north.visible = cz > -ROOM_WALL_Z
+	_wall_south.visible = cz <  ROOM_WALL_Z
 
 
-func _build_room_geometry() -> void:
-	# ── Floor ──────────────────────────────────────────────────────────────
-	_add_box(Vector3(16.0, 0.2, 12.0), Vector3(0.0, -0.1, 0.0), COLOR_FLOOR)
-	# Kitchen floor — spans z 2.0 to 6.0 (center 4.0, depth 4.0).
-	_add_box(Vector3(16.0, 0.21, 4.0), Vector3(0.0, -0.1, 4.0), COLOR_FLOOR_KITCH)
-
-	# ── Walls ──────────────────────────────────────────────────────────────
-	_wall_north = _add_box(Vector3(16.3, 4.0, 0.3), Vector3(0.0, 2.0, -6.0), COLOR_WALL)
-	_wall_south = _add_box(Vector3(16.3, 4.0, 0.3), Vector3(0.0, 2.0,  6.0), COLOR_WALL)
-	_wall_west  = _add_box(Vector3(0.3, 4.0, 12.3), Vector3(-8.0, 2.0, 0.0), COLOR_WALL)
-	_wall_east  = _add_box(Vector3(0.3, 4.0, 12.3), Vector3( 8.0, 2.0, 0.0), COLOR_WALL)
-
-	# ── Baseboard trim ─────────────────────────────────────────────────────
-	_add_box(Vector3(16.0, 0.15, 0.08), Vector3(0.0, 0.075, -5.85), COLOR_TRIM)
-	_add_box(Vector3(16.0, 0.15, 0.08), Vector3(0.0, 0.075,  5.85), COLOR_TRIM)
-	_add_box(Vector3(0.08, 0.15, 12.0), Vector3(-7.85, 0.075, 0.0), COLOR_TRIM)
-	_add_box(Vector3(0.08, 0.15, 12.0), Vector3( 7.85, 0.075, 0.0), COLOR_TRIM)
-
-	# ── Kitchen counter (moved to z = 2.0 for a bigger kitchen) ───────────
-	_add_box(Vector3(11.0, 0.9,  0.4),  Vector3(0.0, 0.45, 2.0), COLOR_COUNTER)
-	_add_box(Vector3(11.0, 0.06, 0.44), Vector3(0.0, 0.92, 2.0), COLOR_TRIM)
-
-	# ── Pickup station pad on the counter ──────────────────────────────────
-	# Green raised square marks where the cook places finished food.
-	_add_box(Vector3(0.50, 0.05, 0.32), Vector3(3.0, 0.975, 2.0), COLOR_STATION_PAD)
-
-	# ── Cooktop appliance against the back (south) kitchen wall ───────────
-	# Main body.
-	_add_box(Vector3(2.2, 0.82, 0.65), Vector3(-2.5, 0.41, 5.67), COLOR_COOKTOP)
-	# Two flat burner pads on top.
-	_add_box(Vector3(0.68, 0.04, 0.52), Vector3(-1.95, 0.84, 5.67), Color(0.12, 0.12, 0.14))
-	_add_box(Vector3(0.68, 0.04, 0.52), Vector3(-3.05, 0.84, 5.67), Color(0.12, 0.12, 0.14))
-
-	# ── Entrance / door on the west wall ───────────────────────────────────
-	# Door frame (two vertical jambs + lintel).
-	_add_box(Vector3(0.12, 3.2,  0.18), Vector3(-7.94, 1.6,  1.12), COLOR_DOOR_FRAME)
-	_add_box(Vector3(0.12, 3.2,  0.18), Vector3(-7.94, 1.6, -1.12), COLOR_DOOR_FRAME)
-	_add_box(Vector3(0.12, 0.18, 2.44), Vector3(-7.94, 3.09, 0.0),  COLOR_DOOR_FRAME)
-
-	_customers_container = Node3D.new()
-	_customers_container.name = "CustomersContainer"
-	add_child(_customers_container)
-
-
-func _add_box(size: Vector3, pos: Vector3, color: Color) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	var mesh := BoxMesh.new()
-	mesh.size = size
-	mi.mesh = mesh
-	mi.position = pos
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = color
-	mi.material_override = mat
-	add_child(mi)
-	return mi
-
+# ─── Scene construction (staff + tables are still dynamic) ────────────────────
 
 func _build_tables() -> void:
 	var count := mini(GameData.table_count, TABLE_POSITIONS.size())
@@ -268,33 +196,6 @@ func _build_staff() -> void:
 		add_child(_server)
 
 
-func _build_camera() -> void:
-	_camera = Camera3D.new()
-	_camera.name = "Camera"
-	_camera.fov = 65.0
-	_camera.near = 0.5
-	_camera.far = 100.0
-	add_child(_camera)
-	_update_camera()
-	_update_wall_visibility()
-
-
-func _update_camera() -> void:
-	var x := cos(_orbit_angle) * ORBIT_RADIUS
-	var z := sin(_orbit_angle) * ORBIT_RADIUS
-	_camera.global_position = Vector3(x, ORBIT_HEIGHT, z)
-	_camera.look_at(FOCAL_POINT, Vector3.UP)
-
-
-func _update_wall_visibility() -> void:
-	var cx := _camera.global_position.x
-	var cz := _camera.global_position.z
-	_wall_west.visible  = cx > -ROOM_WALL_X
-	_wall_east.visible  = cx <  ROOM_WALL_X
-	_wall_north.visible = cz > -ROOM_WALL_Z
-	_wall_south.visible = cz <  ROOM_WALL_Z
-
-
 # ─── Simulation helpers ───────────────────────────────────────────────────────
 
 func get_available_table() -> Table:
@@ -326,11 +227,9 @@ func _spawn_customer() -> void:
 	_customers_container.add_child(customer)
 	customer.global_position = DOOR_POSITION
 
-	# Reserve the table immediately so no other customer is sent there.
 	table.is_reserved = true
 	EventLog.log_event("A %s enters and heads to Table %d" % [customer.alien_type, table.table_id])
 
-	# Walk the customer from the door to the chair position beside the table.
 	var target := table.global_position + Vector3(0.0, 0.0, 0.8)
 	var dist := customer.global_position.distance_to(target)
 	var duration := maxf(dist / GameData.customer_walk_speed, 0.1)
@@ -381,11 +280,8 @@ func _on_table_customer_finished_eating(table: Table) -> void:
 			table.table_id, GameData.meal_payment, tip, customer.alien_type
 		]
 	)
-	# Clear the table immediately (frees the food, resets state) so a new
-	# customer can be seated while the departing one is still walking out.
 	table.clear()
 
-	# Walk the customer to the door, then remove them from the scene.
 	var dist := customer.global_position.distance_to(DOOR_POSITION)
 	var duration := maxf(dist / GameData.customer_walk_speed, 0.1)
 	var tween := create_tween()
